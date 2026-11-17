@@ -15,6 +15,15 @@ Dugme "Promeni START taster" - posle klika pritisnite bilo koji taster.
 
 Vremena se odmah upisuju u rezultati/rezultati_GGGGMMDD.txt (jedan fajl po danu),
 svaki cilj čim se dogodi, pa se ništa ne gubi ni ako se program zatvori.
+
+Po završetku trke pravi se i fajl za Splash Meet Manager u formatu
+"Generic Txt Heat Files" (folder splash/, ime EventB-HeatC.txt):
+    LANE;TIME50
+    1;35.22
+    2;1:02.10
+U Splash-u izabrati sistem za merenje "Generic Txt Heat Files" i usmeriti ga
+na taj folder. Polja Disciplina/Grupa/Dužina u prozoru određuju ime fajla i
+kolonu TIMExx; grupa se posle svake trke sama poveća za 1.
 Vremena su na stotinke, odsečena (ne zaokružena), kako je pravilo u plivanju.
 
 Logika trke (klasa Race) ne zavisi od tastature: kasnije se isti metodi
@@ -23,14 +32,17 @@ start() / finish(staza) / reset() pozivaju sa Arduina preko serijskog porta.
 
 import datetime
 import os
+import re
 import subprocess
 import sys
 import time
 import tkinter as tk
-from tkinter import messagebox, ttk
+from tkinter import filedialog, messagebox, ttk
 
 APP_DIR = os.path.dirname(os.path.abspath(__file__))
 OUT_DIR = os.path.join(APP_DIR, "rezultati")
+SPLASH_DIR_DEFAULT = os.path.join(APP_DIR, "splash")
+DISTANCES = ["25", "50", "100", "200", "400", "800", "1500"]
 
 START_KEY_DEFAULT = "space"
 RESET_KEY = "Escape"
@@ -54,6 +66,31 @@ def fmt(hundredths: int) -> str:
     if h:
         return "%d:%02d:%02d.%02d" % (h, m, s, cs)
     return "%02d:%02d.%02d" % (m, s, cs)
+
+
+def splash_time(hundredths: int) -> str:
+    """Format za Splash: 35.22 ili 1:11.22 (minuti bez vodeće nule)."""
+    m, rest = divmod(hundredths, 6000)
+    s, cs = divmod(rest, 100)
+    if m:
+        return "%d:%02d.%02d" % (m, s, cs)
+    return "%d.%02d" % (s, cs)
+
+
+def write_splash_heat(folder: str, event: str, heat: int, distance: int,
+                      finishes: dict) -> str:
+    """Upisuje EventB-HeatC.txt (Generic Txt Heat Files). Fajl se prvo piše
+    pod privremenim imenom pa preimenuje, da Splash nikad ne pročita pola fajla."""
+    os.makedirs(folder, exist_ok=True)
+    path = os.path.join(folder, "Event%s-Heat%d.txt" % (event, heat))
+    tmp = path + ".tmp"
+    lines = ["LANE;TIME%d" % distance]
+    for lane in sorted(finishes):
+        lines.append("%d;%s" % (lane, splash_time(finishes[lane])))
+    with open(tmp, "w", encoding="ascii", newline="\r\n") as f:
+        f.write("\n".join(lines) + "\n")
+    os.replace(tmp, path)
+    return path
 
 
 def places(finishes: dict) -> list:
@@ -110,6 +147,11 @@ class Race:
         self.out = out
         self.lanes = lanes
         self.race_no = out.last_race_no()
+        self.event = "1"         # broj discipline u Splash-u, npr. "7" ili "7F"
+        self.heat = 1            # grupa
+        self.distance = 50       # dužina u metrima -> kolona TIMExx
+        self.splash_dir = SPLASH_DIR_DEFAULT   # None = ne pravi Splash fajl
+        self.last_splash = None
         self._clear()
 
     def _clear(self):
@@ -130,11 +172,11 @@ class Race:
         self.start_wall = datetime.datetime.now()
         self.state = Race.RUNNING
         self.race_no += 1
-        self.out.write("", "=== Trka %d | %s | staza: %d ===" % (
+        self.out.write("", "=== Trka %d | %s | staza: %d | disc. %s, grupa %d, %dm ===" % (
             self.race_no,
             self.start_wall.strftime("%Y-%m-%d %H:%M:%S.") +
             "%03d" % (self.start_wall.microsecond // 1000),
-            self.lanes))
+            self.lanes, self.event, self.heat, self.distance))
         return True
 
     def finish(self, lane: int, t=None) -> bool:
@@ -158,6 +200,12 @@ class Race:
                 self.out.write("%d. mesto   Staza %d    %s" % (p, lane, fmt(t)))
         self.out.write("--- %s ---" % note)
         self.state = Race.DONE
+        if self.finishes and self.splash_dir:
+            path = write_splash_heat(self.splash_dir, self.event, self.heat,
+                                     self.distance, self.finishes)
+            self.last_splash = path
+            self.out.write("Splash fajl: %s" % os.path.basename(path))
+            self.heat += 1
 
     def reset(self):
         if self.state == Race.RUNNING:
@@ -202,6 +250,26 @@ class App:
                    command=self.ask_key).pack(side="left")
         ttk.Button(top, text="Otvori rezultate", takefocus=0,
                    command=self.open_results).pack(side="right")
+
+        meta = ttk.Frame(root, padding=(10, 0))
+        meta.pack(fill="x")
+        ttk.Label(meta, text="Disciplina:").pack(side="left")
+        self.event_var = tk.StringVar(value=self.race.event)
+        self.e_event = ttk.Entry(meta, width=5, textvariable=self.event_var)
+        self.e_event.pack(side="left", padx=(4, 12))
+        ttk.Label(meta, text="Grupa:").pack(side="left")
+        self.heat_var = tk.StringVar(value=str(self.race.heat))
+        self.e_heat = ttk.Spinbox(meta, from_=1, to=99, width=4, textvariable=self.heat_var)
+        self.e_heat.pack(side="left", padx=(4, 12))
+        ttk.Label(meta, text="Dužina:").pack(side="left")
+        self.dist_var = tk.StringVar(value=str(self.race.distance))
+        self.cb_dist = ttk.Combobox(meta, width=5, state="readonly", values=DISTANCES,
+                                    textvariable=self.dist_var, takefocus=0)
+        self.cb_dist.pack(side="left", padx=(4, 12))
+        self.cb_dist.bind("<<ComboboxSelected>>", lambda e: self.root.focus_set())
+        ttk.Button(meta, text="Splash folder...", takefocus=0,
+                   command=self.choose_splash).pack(side="left")
+        self._synced_heat = self.race.heat
 
         self.time_lbl = tk.Label(root, text="00:00.00",
                                  font=("Consolas", 64, "bold"))
@@ -265,8 +333,16 @@ class App:
             msg, color = "Završeno - Esc za novu trku", "#333333"
         self.state_lbl.config(text="Trka %d: %s" % (
             r.race_no + (1 if r.state == Race.READY else 0), msg), fg=color)
-        self.info_lbl.config(text=os.path.basename(self.out.path))
-        self.cb.config(state="disabled" if r.state == Race.RUNNING else "readonly")
+        self.info_lbl.config(text="%s  |  Splash: %s" % (
+            os.path.basename(self.out.path), r.splash_dir or "isključeno"))
+        running = r.state == Race.RUNNING
+        self.cb.config(state="disabled" if running else "readonly")
+        self.cb_dist.config(state="disabled" if running else "readonly")
+        self.e_event.config(state="disabled" if running else "normal")
+        self.e_heat.config(state="disabled" if running else "normal")
+        if r.heat != self._synced_heat:          # grupa se povećala posle trke
+            self._synced_heat = r.heat
+            self.heat_var.set(str(r.heat))
 
     def tick(self):
         r = self.race
@@ -290,6 +366,12 @@ class App:
     def on_press(self, e):
         t = time.perf_counter()          # vreme uzimamo odmah, pre bilo čega
         k = e.keysym
+        if e.widget in (self.e_event, self.e_heat):
+            # kucanje u polja Disciplina/Grupa; Enter ili Esc vraća na merenje
+            if k in ("Return", "KP_Enter", RESET_KEY):
+                self.root.focus_set()
+                return "break"
+            return None
         if k in self.down:               # automatsko ponavljanje držanog tastera
             return "break"
         self.down.add(k)
@@ -310,7 +392,8 @@ class App:
                 self.do_reset()
             elif k == self.start_key:
                 if self.race.state == Race.READY:
-                    self.race.start(t)
+                    if self.apply_meta():
+                        self.race.start(t)
                 elif self.race.lanes == 1:
                     self.race.finish(1, t)
             elif self.race.lanes > 1 and k in LANE_KEYS:
@@ -329,6 +412,34 @@ class App:
             self.race.reset()
         except OSError as ex:
             messagebox.showerror("Greška pri upisu", str(ex))
+        self.refresh_texts()
+        self.root.focus_set()
+
+    def apply_meta(self) -> bool:
+        ev = self.event_var.get().strip().upper()
+        if not re.fullmatch(r"\d+[A-Z]?", ev):
+            messagebox.showwarning("Disciplina", "Disciplina mora biti broj, npr. 7 ili 7F.")
+            return False
+        try:
+            heat = int(self.heat_var.get())
+            if heat < 1:
+                raise ValueError
+        except ValueError:
+            messagebox.showwarning("Grupa", "Grupa mora biti ceo broj veći od 0.")
+            return False
+        self.event_var.set(ev)
+        self.race.event, self.race.heat = ev, heat
+        self._synced_heat = heat
+        self.race.distance = int(self.dist_var.get())
+        return True
+
+    def choose_splash(self):
+        if self.race.state == Race.RUNNING:
+            return
+        d = filedialog.askdirectory(title="Folder za Splash fajlove",
+                                    initialdir=self.race.splash_dir or APP_DIR)
+        if d:
+            self.race.splash_dir = d
         self.refresh_texts()
         self.root.focus_set()
 
