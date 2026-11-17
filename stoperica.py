@@ -389,6 +389,8 @@ class App:
         self.time_lbl.pack(pady=(10, 0))
         self.state_lbl = tk.Label(root, font=("Segoe UI", 14))
         self.state_lbl.pack()
+        self.order_lbl = tk.Label(root, font=("Segoe UI", 16, "bold"))
+        self.order_lbl.pack()
 
         self.lanes_frame = ttk.Frame(root, padding=(20, 10))
         self.lanes_frame.pack(fill="both", expand=True)
@@ -468,6 +470,11 @@ class App:
             self.event_var.set(r.event)
             self.heat_var.set(str(r.heat))
             self.dist_var.set(str(r.distance))
+        if r.state == Race.DONE and r.lanes > 1 and r.finishes:
+            self.order_lbl.config(text="Ulasci u cilj:  " + " ".join(
+                str(lane) for _, lane, _ in places(r.finishes)))
+        else:
+            self.order_lbl.config(text="")
         self.update_prog_label()
 
     def update_prog_label(self):
