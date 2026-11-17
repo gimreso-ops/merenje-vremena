@@ -8,6 +8,7 @@ Kućni sistem za merenje vremena plivača (start + 8 staza), sa ciljem da se rez
 |---|---|
 | `stoperica.py` | Merenje sa tastature: START taster pokreće/zaustavlja vreme, Esc resetuje; režim 2–8 staza (tasteri 1–8). Vremena se upisuju u `rezultati/rezultati_GGGGMMDD.txt`, a po završetku trke pravi se `splash/EventB-HeatC.txt` za Splash. |
 | `com_sniffer.py` | Praćenje i snimanje saobraćaja na COM portu (ALGE ↔ Splash) u log fajl. Režimi `list`, `sniff`, `bridge` (com0com). |
+| `arduino/tasteri/tasteri.ino` | Arduino Uno/Mega: 9 tastera (D2 start, D3–D10 staze 1–8) šalje `S` / `L1`–`L8` preko USB-a (115200). |
 | `snimi_bridge.bat` | Primer pokretanja `com_sniffer.py` u bridge režimu. |
 
 ## Pokretanje
