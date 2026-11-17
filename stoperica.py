@@ -39,7 +39,12 @@ import time
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 
-APP_DIR = os.path.dirname(os.path.abspath(__file__))
+# Kod .exe napravljenog PyInstaller-om __file__ pokazuje na privremeni folder,
+# pa se rezultati čuvaju pored samog .exe fajla.
+if getattr(sys, "frozen", False):
+    APP_DIR = os.path.dirname(os.path.abspath(sys.executable))
+else:
+    APP_DIR = os.path.dirname(os.path.abspath(__file__))
 OUT_DIR = os.path.join(APP_DIR, "rezultati")
 SPLASH_DIR_DEFAULT = os.path.join(APP_DIR, "splash")
 DISTANCES = ["25", "50", "100", "200", "400", "800", "1500"]
