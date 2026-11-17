@@ -1,0 +1,7 @@
+# Program takmičenja za Stopericu
+# Preimenujte u program.txt i stavite pored Stoperica.exe (ili učitajte dugmetom "Program...")
+# disciplina;dužina;broj grupa;naziv
+1;50;3;50m slobodno žene
+2;50;2;50m slobodno muškarci
+3;100;2;100m prsno žene
+7F;100;1;100m leđno finale

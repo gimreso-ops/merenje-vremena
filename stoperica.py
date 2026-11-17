@@ -26,6 +26,15 @@ na taj folder. Polja Disciplina/Grupa/Dužina u prozoru određuju ime fajla i
 kolonu TIMExx; grupa se posle svake trke sama poveća za 1.
 Vremena su na stotinke, odsečena (ne zaokružena), kako je pravilo u plivanju.
 
+Prazne staze: pored svake staze je dugme "isključi" (radi i dok trka traje).
+Isključena staza se ne čeka i ne ulazi u Splash fajl.
+
+Program takmičenja: fajl program.txt pored programa (ili dugme "Program..."),
+jedan red po disciplini:  disciplina;dužina;broj grupa;naziv
+    1;50;3;50m slobodno žene
+    7F;100;1;100m leđno finale
+Posle svake trke program sam prelazi na sledeću grupu, odnosno disciplinu.
+
 Logika trke (klasa Race) ne zavisi od tastature: kasnije se isti metodi
 start() / finish(staza) / reset() pozivaju sa Arduina preko serijskog porta.
 """
@@ -47,6 +56,7 @@ else:
     APP_DIR = os.path.dirname(os.path.abspath(__file__))
 OUT_DIR = os.path.join(APP_DIR, "rezultati")
 SPLASH_DIR_DEFAULT = os.path.join(APP_DIR, "splash")
+PROGRAM_FILE = os.path.join(APP_DIR, "program.txt")
 DISTANCES = ["25", "50", "100", "200", "400", "800", "1500"]
 
 START_KEY_DEFAULT = "space"
@@ -96,6 +106,39 @@ def write_splash_heat(folder: str, event: str, heat: int, distance: int,
         f.write("\n".join(lines) + "\n")
     os.replace(tmp, path)
     return path
+
+
+def load_program(path: str) -> list:
+    """Čita program takmičenja: disciplina;dužina;grupe;naziv (naziv opciono).
+    Prazni redovi i redovi koji počinju sa # se preskaču."""
+    raw = open(path, "rb").read()
+    for enc in ("utf-8-sig", "cp1250"):
+        try:
+            text = raw.decode(enc)
+            break
+        except UnicodeDecodeError:
+            continue
+    prog, errors = [], []
+    for n, line in enumerate(text.splitlines(), 1):
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        parts = [x.strip() for x in line.split(";")]
+        try:
+            ev = parts[0].upper()
+            if not re.fullmatch(r"\d+[A-Z]?", ev):
+                raise ValueError
+            dist, heats = int(parts[1]), int(parts[2])
+            if dist <= 0 or heats <= 0:
+                raise ValueError
+        except (IndexError, ValueError):
+            errors.append("red %d: %s" % (n, line))
+            continue
+        name = ";".join(parts[3:]) if len(parts) > 3 else ""
+        prog.append({"event": ev, "distance": dist, "heats": heats, "name": name})
+    if errors:
+        raise ValueError("Neispravni redovi u programu:\n" + "\n".join(errors[:10]))
+    return prog
 
 
 def places(finishes: dict) -> list:
@@ -157,6 +200,8 @@ class Race:
         self.distance = 50       # dužina u metrima -> kolona TIMExx
         self.splash_dir = SPLASH_DIR_DEFAULT   # None = ne pravi Splash fajl
         self.last_splash = None
+        self.program = []        # lista disciplina (load_program)
+        self.program_end = False
         self._clear()
 
     def _clear(self):
@@ -164,6 +209,7 @@ class Race:
         self.t0 = None
         self.start_wall = None
         self.finishes = {}       # staza -> stotinke
+        self.disabled = set()    # isključene (prazne) staze
 
     def elapsed(self) -> int:
         if self.t0 is None:
@@ -184,17 +230,62 @@ class Race:
             self.lanes, self.event, self.heat, self.distance))
         return True
 
+    def active_lanes(self) -> list:
+        return [l for l in range(1, self.lanes + 1) if l not in self.disabled]
+
+    def _all_finished(self) -> bool:
+        act = self.active_lanes()
+        return bool(act) and all(l in self.finishes for l in act)
+
+    def toggle_lane(self, lane: int) -> bool:
+        """Uključuje/isključuje stazu; dozvoljeno pre i tokom trke."""
+        if self.state == Race.DONE or lane in self.finishes or not 1 <= lane <= self.lanes:
+            return False
+        if lane in self.disabled:
+            self.disabled.discard(lane)
+            what = "uključena"
+        else:
+            self.disabled.add(lane)
+            what = "isključena"
+        if self.state == Race.RUNNING:
+            self.out.write("(staza %d %s)" % (lane, what))
+            if self._all_finished():
+                self._end("kraj trke")
+        return True
+
+    def program_entry(self):
+        for i, e in enumerate(self.program):
+            if e["event"] == self.event:
+                return i, e
+        return None, None
+
+    def set_program_event(self, idx: int):
+        e = self.program[idx]
+        self.event, self.distance, self.heat = e["event"], e["distance"], 1
+        self.program_end = False
+
+    def _advance(self):
+        """Sledeća grupa; posle poslednje grupe sledeća disciplina iz programa."""
+        i, e = self.program_entry()
+        if e is None or self.heat < e["heats"]:
+            self.heat += 1
+        elif i + 1 < len(self.program):
+            self.set_program_event(i + 1)
+        else:
+            self.heat += 1
+            self.program_end = True
+
     def finish(self, lane: int, t=None) -> bool:
         if self.state != Race.RUNNING or not 1 <= lane <= self.lanes:
             return False
-        if lane in self.finishes:
+        if lane in self.finishes or lane in self.disabled:
             return False
         t = t if t is not None else time.perf_counter()
         if t - self.t0 < MIN_RACE_S:
             return False
         self.finishes[lane] = to_hundredths(t - self.t0)
         self.out.write("Staza %d    %s" % (lane, fmt(self.finishes[lane])))
-        if len(self.finishes) == self.lanes:
+        if self._all_finished():
             self._end("kraj trke")
         return True
 
@@ -203,6 +294,9 @@ class Race:
             self.out.write("-- Plasman --")
             for p, lane, t in places(self.finishes):
                 self.out.write("%d. mesto   Staza %d    %s" % (p, lane, fmt(t)))
+        if self.disabled:
+            self.out.write("Isključene staze: %s" % ", ".join(
+                str(l) for l in sorted(self.disabled)))
         self.out.write("--- %s ---" % note)
         self.state = Race.DONE
         if self.finishes and self.splash_dir:
@@ -210,7 +304,7 @@ class Race:
                                      self.distance, self.finishes)
             self.last_splash = path
             self.out.write("Splash fajl: %s" % os.path.basename(path))
-            self.heat += 1
+            self._advance()
 
     def reset(self):
         if self.state == Race.RUNNING:
@@ -239,7 +333,7 @@ class App:
         self.down = set()          # tasteri koji su trenutno pritisnuti
 
         root.title("Stoperica - plivanje")
-        root.geometry("620x560")
+        root.geometry("680x640")
         root.minsize(480, 420)
 
         top = ttk.Frame(root, padding=10)
@@ -255,6 +349,16 @@ class App:
                    command=self.ask_key).pack(side="left")
         ttk.Button(top, text="Otvori rezultate", takefocus=0,
                    command=self.open_results).pack(side="right")
+
+        prog = ttk.Frame(root, padding=(10, 0, 10, 6))
+        prog.pack(fill="x")
+        ttk.Button(prog, text="Program...", takefocus=0,
+                   command=self.choose_program).pack(side="left")
+        self.prog_var = tk.StringVar()
+        self.cb_prog = ttk.Combobox(prog, state="readonly", textvariable=self.prog_var,
+                                    takefocus=0, width=40)
+        self.cb_prog.pack(side="left", padx=(6, 0), fill="x", expand=True)
+        self.cb_prog.bind("<<ComboboxSelected>>", self.on_prog_select)
 
         meta = ttk.Frame(root, padding=(10, 0))
         meta.pack(fill="x")
@@ -274,7 +378,11 @@ class App:
         self.cb_dist.bind("<<ComboboxSelected>>", lambda e: self.root.focus_set())
         ttk.Button(meta, text="Splash folder...", takefocus=0,
                    command=self.choose_splash).pack(side="left")
-        self._synced_heat = self.race.heat
+        self._synced = (self.race.event, self.race.heat, self.race.distance)
+        self.prog_lbl = tk.Label(root, font=("Segoe UI", 12), fg="#1f4f8f")
+        self.prog_lbl.pack(pady=(6, 0))
+        for v in (self.event_var, self.heat_var):
+            v.trace_add("write", lambda *_: self.update_prog_label())
 
         self.time_lbl = tk.Label(root, text="00:00.00",
                                  font=("Consolas", 64, "bold"))
@@ -297,6 +405,8 @@ class App:
         root.bind_all("<KeyRelease>", self.on_release)
         root.protocol("WM_DELETE_WINDOW", self.on_close)
 
+        if os.path.exists(PROGRAM_FILE):
+            self.load_program_file(PROGRAM_FILE, quiet=True)
         self.build_lanes()
         self.refresh_texts()
         self.root.focus_force()
@@ -310,15 +420,19 @@ class App:
         if self.race.lanes == 1:
             return
         for lane in range(1, self.race.lanes + 1):
-            row = ttk.Frame(self.lanes_frame)
+            row = tk.Frame(self.lanes_frame)
             row.pack(fill="x", pady=1)
-            ttk.Label(row, text="Staza %d" % lane, width=9,
-                      font=("Segoe UI", 13)).pack(side="left")
-            t = ttk.Label(row, text="--:--.--", font=("Consolas", 16))
+            b = tk.Button(row, width=8, takefocus=0,
+                          command=lambda l=lane: self.toggle_lane(l))
+            b.pack(side="left", padx=(0, 10))
+            n = tk.Label(row, text="Staza %d" % lane, width=8, anchor="w",
+                         font=("Segoe UI", 13))
+            n.pack(side="left")
+            t = tk.Label(row, text="--:--.--", font=("Consolas", 16))
             t.pack(side="left", padx=10)
-            p = ttk.Label(row, text="", font=("Segoe UI", 13, "bold"))
+            p = tk.Label(row, text="", font=("Segoe UI", 13, "bold"))
             p.pack(side="left")
-            self.lane_lbls[lane] = (t, p)
+            self.lane_lbls[lane] = (b, n, t, p)
 
     def key_name(self, k):
         return {"space": "RAZMAK", "Return": "ENTER"}.get(k, k.upper() if len(k) == 1 else k)
@@ -334,6 +448,8 @@ class App:
             msg = ("U toku - %s zaustavlja" % sk) if r.lanes == 1 \
                 else "U toku - tasteri 1-%d zaustavljaju staze" % r.lanes
             color = "#b00000"
+        elif r.program_end:
+            msg, color = "Završeno - KRAJ PROGRAMA", "#333333"
         else:
             msg, color = "Završeno - Esc za novu trku", "#333333"
         self.state_lbl.config(text="Trka %d: %s" % (
@@ -345,9 +461,36 @@ class App:
         self.cb_dist.config(state="disabled" if running else "readonly")
         self.e_event.config(state="disabled" if running else "normal")
         self.e_heat.config(state="disabled" if running else "normal")
-        if r.heat != self._synced_heat:          # grupa se povećala posle trke
-            self._synced_heat = r.heat
+        self.cb_prog.config(state="disabled" if running or not r.program else "readonly")
+        cur = (r.event, r.heat, r.distance)
+        if cur != self._synced:                  # program je prešao na sledeću trku
+            self._synced = cur
+            self.event_var.set(r.event)
             self.heat_var.set(str(r.heat))
+            self.dist_var.set(str(r.distance))
+        self.update_prog_label()
+
+    def update_prog_label(self):
+        r = self.race
+        if not r.program:
+            self.prog_lbl.config(text="")
+            self.prog_var.set("")
+            return
+        try:
+            ev = self.event_var.get().strip().upper()
+            heat = int(self.heat_var.get())
+        except ValueError:
+            ev, heat = r.event, r.heat
+        i = next((k for k, e in enumerate(r.program) if e["event"] == ev), None)
+        if i is None:
+            self.prog_lbl.config(text="Disciplina %s nije u programu" % ev)
+            self.prog_var.set("")
+            return
+        e = r.program[i]
+        self.cb_prog.current(i)
+        extra = "  (van programa!)" if heat > e["heats"] else ""
+        self.prog_lbl.config(text="Disc. %s  -  grupa %d od %d  -  %dm  %s%s" % (
+            e["event"], heat, e["heats"], e["distance"], e["name"], extra))
 
     def tick(self):
         r = self.race
@@ -358,13 +501,21 @@ class App:
         elif r.lanes == 1 and 1 in r.finishes:
             self.time_lbl.config(text=fmt(r.finishes[1]))
         pl = {lane: p for p, lane, _ in places(r.finishes)}
-        for lane, (t, p) in self.lane_lbls.items():
+        for lane, (b, n, t, p) in self.lane_lbls.items():
+            off = lane in r.disabled
+            gray = "#aaaaaa" if off else "black"
+            n.config(fg=gray)
+            t.config(fg=gray)
             if lane in r.finishes:
                 t.config(text=fmt(r.finishes[lane]))
                 p.config(text="%d." % pl[lane])
             else:
-                t.config(text="--:--.--")
+                t.config(text="prazna" if off else "--:--.--")
                 p.config(text="")
+            can = r.state != Race.DONE and lane not in r.finishes
+            b.config(text="uključi" if off else "isključi",
+                     state="normal" if can else "disabled",
+                     bg="#f3d6d6" if off else "#dfeedd")
         self.root.after(REFRESH_MS, self.tick)
 
     # --- tastatura
@@ -434,9 +585,53 @@ class App:
             return False
         self.event_var.set(ev)
         self.race.event, self.race.heat = ev, heat
-        self._synced_heat = heat
         self.race.distance = int(self.dist_var.get())
+        self._synced = (ev, heat, self.race.distance)
+        self.race.program_end = False
         return True
+
+    def toggle_lane(self, lane: int):
+        try:
+            self.race.toggle_lane(lane)
+        except OSError as ex:
+            messagebox.showerror("Greška pri upisu", str(ex))
+        self.refresh_texts()
+        self.root.focus_set()
+
+    def load_program_file(self, path: str, quiet: bool = False):
+        try:
+            prog = load_program(path)
+        except (OSError, ValueError) as ex:
+            messagebox.showerror("Program", str(ex))
+            return
+        if not prog:
+            if not quiet:
+                messagebox.showwarning("Program", "Fajl ne sadrži nijednu disciplinu.")
+            return
+        r = self.race
+        r.program = prog
+        self.cb_prog.config(values=["%s  -  %dm  -  %d gr.  %s" % (
+            e["event"], e["distance"], e["heats"], e["name"]) for e in prog])
+        if r.state != Race.RUNNING:
+            r.set_program_event(0)
+        self.refresh_texts()
+
+    def choose_program(self):
+        if self.race.state == Race.RUNNING:
+            return
+        path = filedialog.askopenfilename(
+            title="Program takmičenja", initialdir=APP_DIR,
+            filetypes=[("Tekst", "*.txt *.csv"), ("Svi fajlovi", "*.*")])
+        if path:
+            self.load_program_file(path)
+        self.root.focus_set()
+
+    def on_prog_select(self, _e=None):
+        if self.race.state == Race.RUNNING:
+            return
+        self.race.set_program_event(self.cb_prog.current())
+        self.refresh_texts()
+        self.root.focus_set()
 
     def choose_splash(self):
         if self.race.state == Race.RUNNING:

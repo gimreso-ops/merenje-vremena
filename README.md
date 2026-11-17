@@ -24,6 +24,19 @@ GitHub Actions posle svake izmene na `main` pravi `Stoperica.exe` i `ComSniffer.
 (kartica **Actions** → poslednje pokretanje → **Artifacts**). Za trajno izdanje:
 `git tag v1.0` i `git push origin v1.0` — fajlovi se pojavljuju u **Releases**.
 
+## Program takmičenja i prazne staze
+
+`program.txt` pored programa (primer: `program_primer.txt`), jedan red po disciplini:
+
+```
+# disciplina;dužina;broj grupa;naziv
+1;50;3;50m slobodno žene
+7F;100;1;100m leđno finale
+```
+
+Posle svake trke Stoperica prelazi na sledeću grupu, a posle poslednje grupe na sledeću disciplinu.
+Pored svake staze je dugme **isključi** (radi i tokom trke) — isključena staza se ne čeka i ne ide u Splash fajl.
+
 ## Splash Meet Manager
 
 Splash ima interfejs **Generic Txt Heat Files** ([Swim Wiki](https://wiki.swimrankings.net/index.php/Meet_Manager:Timing_System_Generic_Txt_Heat_Files)):
