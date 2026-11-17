@@ -3,3 +3,6 @@ logovi/
 __pycache__/
 *.pyc
 splash/
+build/
+dist/
+*.spec

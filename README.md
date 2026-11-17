@@ -18,6 +18,12 @@ python stoperica.py
 python com_sniffer.py list
 ```
 
+## Gotovi .exe fajlovi
+
+GitHub Actions posle svake izmene na `main` pravi `Stoperica.exe` i `ComSniffer.exe`
+(kartica **Actions** → poslednje pokretanje → **Artifacts**). Za trajno izdanje:
+`git tag v1.0` i `git push origin v1.0` — fajlovi se pojavljuju u **Releases**.
+
 ## Splash Meet Manager
 
 Splash ima interfejs **Generic Txt Heat Files** ([Swim Wiki](https://wiki.swimrankings.net/index.php/Meet_Manager:Timing_System_Generic_Txt_Heat_Files)):

@@ -1,0 +1,45 @@
+name: Napravi .exe
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Instalacija alata
+        run: pip install pyinstaller pyserial
+
+      - name: Stoperica.exe
+        run: pyinstaller --onefile --windowed --name Stoperica stoperica.py
+
+      - name: ComSniffer.exe
+        run: pyinstaller --onefile --name ComSniffer com_sniffer.py
+
+      - name: Postavljanje za preuzimanje (Actions -> Artifacts)
+        uses: actions/upload-artifact@v4
+        with:
+          name: merenje-vremena-exe
+          path: |
+            dist/Stoperica.exe
+            dist/ComSniffer.exe
+
+      - name: Objava izdanja (samo za tag v*)
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/Stoperica.exe
+            dist/ComSniffer.exe
