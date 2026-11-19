@@ -35,6 +35,12 @@ jedan red po disciplini:  disciplina;dužina;broj grupa;naziv
     7F;100;1;100m leđno finale
 Posle svake trke program sam prelazi na sledeću grupu, odnosno disciplinu.
 
+Lenex startna lista iz Splash-a (.lxf ili .lef, dugme "Program..."): program,
+broj staza, imena plivača i klubovi po stazama; prazne staze se same isključe.
+
+Semafor: dugme "Semafor" otvara drugi prozor preko celog projektora (drugi
+ekran, Win+P -> Extend). F11 ili dupli klik uključuje/isključuje ceo ekran.
+
 Logika trke (klasa Race) ne zavisi od tastature: kasnije se isti metodi
 start() / finish(staza) / reset() pozivaju sa Arduina preko serijskog porta.
 """
@@ -45,6 +51,8 @@ import re
 import subprocess
 import sys
 import time
+import xml.etree.ElementTree as ET
+import zipfile
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 
@@ -141,6 +149,122 @@ def load_program(path: str) -> list:
     return prog
 
 
+STROKES = {"FREE": "slobodno", "BACK": "leđno", "BREAST": "prsno", "FLY": "delfin",
+           "MEDLEY": "mešovito", "IMRELAY": "mešovito"}
+GENDERS = {"M": "muški", "F": "ženski", "X": "mešovito"}
+CLUB_MAX = 22        # najviše znakova za naziv kluba na semaforu
+
+
+def short(text: str, n: int) -> str:
+    text = " ".join((text or "").split())
+    return text if len(text) <= n else text[:n - 1].rstrip() + "…"
+
+
+def load_lenex(path: str) -> dict:
+    """Čita Lenex startnu listu (.lxf = zip, .lef = xml).
+    Vraća program, startnu listu {(disciplina, grupa): {staza: (ime, klub)}},
+    broj staza bazena i naziv takmičenja."""
+    if zipfile.is_zipfile(path):
+        with zipfile.ZipFile(path) as z:
+            names = [n for n in z.namelist() if n.lower().endswith((".lef", ".xml"))]
+            if not names:
+                raise ValueError("U .lxf arhivi nema .lef fajla.")
+            data = z.read(names[0])
+    else:
+        with open(path, "rb") as f:
+            data = f.read()
+    try:
+        root = ET.fromstring(data)
+    except ET.ParseError as ex:
+        raise ValueError("Fajl nije ispravan Lenex (XML): %s" % ex)
+    meet = root.find(".//MEET")
+    if meet is None:
+        raise ValueError("U fajlu nema takmičenja (MEET).")
+
+    def num(x, default=0):
+        try:
+            return int(x)
+        except (TypeError, ValueError):
+            return default
+
+    program, heat_of = [], {}
+    sessions = sorted(meet.findall("SESSIONS/SESSION"), key=lambda e: num(e.get("number")))
+    for ses in sessions:
+        events = sorted(ses.findall("EVENTS/EVENT"),
+                        key=lambda e: (num(e.get("order"), 9999), num(e.get("number"))))
+        for ev in events:
+            heats = ev.findall("HEATS/HEAT")
+            if not heats:
+                continue                  # disciplina bez prijavljenih
+            evno = (ev.get("number") or "").strip().upper()
+            st = ev.find("SWIMSTYLE")
+            st = st.attrib if st is not None else {}
+            dist = num(st.get("distance"), 50)
+            relay = num(st.get("relaycount"), 1)
+            name = st.get("name") or "%s%dm %s %s" % (
+                "%dx" % relay if relay > 1 else "", dist,
+                STROKES.get(st.get("stroke", ""), ""), GENDERS.get(ev.get("gender", ""), ""))
+            for h in heats:
+                heat_of[h.get("heatid")] = (evno, num(h.get("number"), 1))
+            program.append({"event": evno, "distance": dist * relay,
+                            "heats": max(num(h.get("number"), 1) for h in heats),
+                            "name": " ".join(name.split())})
+
+    startlist, max_lane = {}, 0
+    for club in meet.iter("CLUB"):
+        cname = club.get("shortname") or club.get("name") or club.get("code") or ""
+        for ath in club.findall("ATHLETES/ATHLETE"):
+            person = "%s %s" % (ath.get("firstname", ""), ath.get("lastname", ""))
+            for en in ath.findall("ENTRIES/ENTRY"):
+                key, lane = heat_of.get(en.get("heatid")), num(en.get("lane"))
+                if key and lane > 0:
+                    startlist.setdefault(key, {})[lane] = (person.strip(), cname)
+                    max_lane = max(max_lane, lane)
+        for rel in club.findall("RELAYS/RELAY"):
+            for en in rel.findall("ENTRIES/ENTRY"):
+                key, lane = heat_of.get(en.get("heatid")), num(en.get("lane"))
+                if key and lane > 0:
+                    startlist.setdefault(key, {})[lane] = (cname, "štafeta")
+                    max_lane = max(max_lane, lane)
+    pool = meet.find("POOL")
+    lanes = num(pool.get("lanemax")) if pool is not None else 0
+    lanes = min(8, max(lanes or max_lane, 1))
+    return {"program": program, "startlist": startlist, "lanes": lanes,
+            "name": meet.get("name", "")}
+
+
+def monitors() -> list:
+    """Ekrani na Windows-u: [(x, y, širina, visina, glavni)]. Drugde prazna lista."""
+    if not sys.platform.startswith("win"):
+        return []
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        class MONITORINFO(ctypes.Structure):
+            _fields_ = [("cbSize", wintypes.DWORD), ("rcMonitor", wintypes.RECT),
+                        ("rcWork", wintypes.RECT), ("dwFlags", wintypes.DWORD)]
+
+        user32 = ctypes.windll.user32
+        found = []
+        proc_t = ctypes.WINFUNCTYPE(ctypes.c_int, wintypes.HMONITOR, wintypes.HDC,
+                                    ctypes.POINTER(wintypes.RECT), wintypes.LPARAM)
+
+        def cb(hmon, _hdc, _rc, _lp):
+            mi = MONITORINFO()
+            mi.cbSize = ctypes.sizeof(MONITORINFO)
+            user32.GetMonitorInfoW(hmon, ctypes.byref(mi))
+            r = mi.rcMonitor
+            found.append((r.left, r.top, r.right - r.left, r.bottom - r.top,
+                          bool(mi.dwFlags & 1)))
+            return 1
+
+        user32.EnumDisplayMonitors(None, None, proc_t(cb), 0)
+        return found
+    except Exception:
+        return []
+
+
 def places(finishes: dict) -> list:
     """[(mesto, staza, stotinke)], isto vreme = isto mesto."""
     order = sorted(finishes.items(), key=lambda kv: (kv[1], kv[0]))
@@ -200,8 +324,10 @@ class Race:
         self.distance = 50       # dužina u metrima -> kolona TIMExx
         self.splash_dir = SPLASH_DIR_DEFAULT   # None = ne pravi Splash fajl
         self.last_splash = None
-        self.program = []        # lista disciplina (load_program)
+        self.program = []        # lista disciplina (load_program / load_lenex)
         self.program_end = False
+        self.startlist = {}      # {(disciplina, grupa): {staza: (ime, klub)}}
+        self._applied = None
         self._clear()
 
     def _clear(self):
@@ -210,6 +336,29 @@ class Race:
         self.start_wall = None
         self.finishes = {}       # staza -> stotinke
         self.disabled = set()    # isključene (prazne) staze
+        self._applied = None
+        self.apply_startlist()
+
+    def heat_entries(self) -> dict:
+        return self.startlist.get((self.event, self.heat), {})
+
+    def lane_info(self, lane: int):
+        return self.heat_entries().get(lane)
+
+    def apply_startlist(self):
+        """Pre trke isključi staze u kojima po startnoj listi niko ne pliva.
+        Radi se samo kad se promeni disciplina/grupa, pa ručna podešavanja ostaju."""
+        key = (self.event, self.heat)
+        if self.state != Race.READY or not self.startlist or key == self._applied:
+            return
+        self._applied = key
+        if key in self.startlist:
+            used = self.startlist[key]
+            self.disabled = {l for l in range(1, self.lanes + 1) if l not in used}
+
+    def who(self, lane: int) -> str:
+        info = self.lane_info(lane)
+        return "   %s (%s)" % info if info else ""
 
     def elapsed(self) -> int:
         if self.t0 is None:
@@ -263,6 +412,7 @@ class Race:
         e = self.program[idx]
         self.event, self.distance, self.heat = e["event"], e["distance"], 1
         self.program_end = False
+        self.apply_startlist()
 
     def _advance(self):
         """Sledeća grupa; posle poslednje grupe sledeća disciplina iz programa."""
@@ -284,7 +434,7 @@ class Race:
         if t - self.t0 < MIN_RACE_S:
             return False
         self.finishes[lane] = to_hundredths(t - self.t0)
-        self.out.write("Staza %d    %s" % (lane, fmt(self.finishes[lane])))
+        self.out.write("Staza %d    %s%s" % (lane, fmt(self.finishes[lane]), self.who(lane)))
         if self._all_finished():
             self._end("kraj trke")
         return True
@@ -293,7 +443,7 @@ class Race:
         if self.lanes > 1 and self.finishes:
             self.out.write("-- Plasman --")
             for p, lane, t in places(self.finishes):
-                self.out.write("%d. mesto   Staza %d    %s" % (p, lane, fmt(t)))
+                self.out.write("%d. mesto   Staza %d    %s%s" % (p, lane, fmt(t), self.who(lane)))
         if self.disabled:
             self.out.write("Isključene staze: %s" % ", ".join(
                 str(l) for l in sorted(self.disabled)))
@@ -321,6 +471,121 @@ class Race:
         return True
 
 
+# ---------------------------------------------------------------- semafor
+
+class Scoreboard(tk.Toplevel):
+    BG, FG, DIM = "#000000", "#ffffff", "#555555"
+    HEAD, TIME, PLACE = "#ffd34d", "#7fe3ff", "#ffd34d"
+
+    def __init__(self, app):
+        super().__init__(app.root, bg=self.BG)
+        self.app = app
+        self.title("Semafor")
+        self.n = 0
+        self.rows = {}
+        self.px = 40
+        self.head_l = tk.Label(self, bg=self.BG, fg=self.HEAD, anchor="w")
+        self.head_r = tk.Label(self, bg=self.BG, fg=self.HEAD, anchor="e")
+        self.clock = tk.Label(self, bg=self.BG, fg=self.FG)
+        self.head_l.grid(row=0, column=0, columnspan=3, sticky="w", padx=20, pady=(10, 0))
+        self.head_r.grid(row=0, column=3, columnspan=2, sticky="e", padx=20, pady=(10, 0))
+        self.clock.grid(row=1, column=0, columnspan=5, pady=(0, 10))
+        self.columnconfigure(1, weight=3)
+        self.columnconfigure(2, weight=2)
+        self.bind("<Configure>", self.on_resize)
+        self.bind("<Double-Button-1>", lambda e: self.toggle_fullscreen())
+        self.protocol("WM_DELETE_WINDOW", self.close)
+        self.geometry("1024x576")
+        self.place_on_projector()
+
+    def place_on_projector(self):
+        mons = monitors()
+        other = [m for m in mons if not m[4]]
+        if other:
+            x, y, w, h, _ = other[0]
+            self.geometry("%dx%d+%d+%d" % (w, h, x, y))
+            self.update_idletasks()
+            self.attributes("-fullscreen", True)
+
+    def toggle_fullscreen(self):
+        self.attributes("-fullscreen", not self.attributes("-fullscreen"))
+
+    def close(self):
+        self.app.board = None
+        self.destroy()
+        self.app.root.focus_force()
+
+    def on_resize(self, e):
+        if e.widget is self:
+            px = max(14, int(e.height / (self.n + 3.6) * 0.62))
+            if px != self.px:
+                self.px = px
+                self.apply_fonts()
+
+    def apply_fonts(self):
+        px = self.px
+        self.head_l.config(font=("Arial", -int(px * 0.8), "bold"))
+        self.head_r.config(font=("Arial", -int(px * 0.8), "bold"))
+        self.clock.config(font=("Consolas", -int(px * 1.5), "bold"))
+        for lane_l, name_l, club_l, time_l, place_l in self.rows.values():
+            lane_l.config(font=("Arial", -px, "bold"))
+            name_l.config(font=("Arial", -px, "bold"))
+            club_l.config(font=("Arial", -int(px * 0.75)))
+            time_l.config(font=("Consolas", -px, "bold"))
+            place_l.config(font=("Arial", -px, "bold"))
+
+    def build(self, n: int):
+        for ws in self.rows.values():
+            for w in ws:
+                w.destroy()
+        self.rows = {}
+        self.n = n
+        for lane in range(1, n + 1):
+            r = lane + 1
+            ws = (tk.Label(self, bg=self.BG, fg=self.HEAD, text=str(lane), width=2),
+                  tk.Label(self, bg=self.BG, fg=self.FG, anchor="w"),
+                  tk.Label(self, bg=self.BG, fg=self.FG, anchor="w"),
+                  tk.Label(self, bg=self.BG, fg=self.TIME, anchor="e"),
+                  tk.Label(self, bg=self.BG, fg=self.PLACE, anchor="e", width=3))
+            for c, w in enumerate(ws):
+                w.grid(row=r, column=c, sticky="ew", padx=(20 if c == 0 else 8, 20 if c == 4 else 8))
+            self.rowconfigure(r, weight=1)
+            self.rows[lane] = ws
+        self.apply_fonts()
+
+    def refresh(self):
+        r = self.app.race
+        if r.lanes != self.n:
+            self.build(r.lanes)
+        i, e = r.program_entry()
+        title = ("Disc. %s  %s" % (r.event, e["name"])) if e else "Disciplina %s  %dm" % (
+            r.event, r.distance)
+        heats = ("/%d" % e["heats"]) if e else ""
+        self.head_l.config(text=title)
+        self.head_r.config(text="Grupa %d%s" % (r.heat, heats))
+        if r.state == Race.RUNNING:
+            self.clock.config(text=fmt(r.elapsed()))
+        elif r.state == Race.READY:
+            self.clock.config(text=fmt(0))
+        else:
+            self.clock.config(text=fmt(max(r.finishes.values())) if r.finishes else fmt(0))
+        pl = {lane: p for p, lane, _ in places(r.finishes)}
+        for lane, (lane_l, name_l, club_l, time_l, place_l) in self.rows.items():
+            off = lane in r.disabled
+            info = r.lane_info(lane)
+            name, club = (info[0], short(info[1], CLUB_MAX)) if info else ("", "")
+            color = self.DIM if off else self.FG
+            lane_l.config(fg=self.DIM if off else self.HEAD)
+            name_l.config(text=name, fg=color)
+            club_l.config(text=club, fg=self.DIM if off else "#bbbbbb")
+            if lane in r.finishes:
+                time_l.config(text=fmt(r.finishes[lane]))
+                place_l.config(text="%d." % pl[lane])
+            else:
+                time_l.config(text="")
+                place_l.config(text="")
+
+
 # ---------------------------------------------------------------- prozor
 
 class App:
@@ -331,9 +596,11 @@ class App:
         self.start_key = START_KEY_DEFAULT
         self.waiting_key = False
         self.down = set()          # tasteri koji su trenutno pritisnuti
+        self.board = None          # prozor semafora
+        self.program_path = None
 
         root.title("Stoperica - plivanje")
-        root.geometry("680x640")
+        root.geometry("860x700")
         root.minsize(480, 420)
 
         top = ttk.Frame(root, padding=10)
@@ -349,11 +616,15 @@ class App:
                    command=self.ask_key).pack(side="left")
         ttk.Button(top, text="Otvori rezultate", takefocus=0,
                    command=self.open_results).pack(side="right")
+        ttk.Button(top, text="Semafor", takefocus=0,
+                   command=self.toggle_board).pack(side="right", padx=(0, 8))
 
         prog = ttk.Frame(root, padding=(10, 0, 10, 6))
         prog.pack(fill="x")
         ttk.Button(prog, text="Program...", takefocus=0,
                    command=self.choose_program).pack(side="left")
+        ttk.Button(prog, text="Ponovo učitaj", takefocus=0,
+                   command=self.reload_program).pack(side="left", padx=(6, 0))
         self.prog_var = tk.StringVar()
         self.cb_prog = ttk.Combobox(prog, state="readonly", textvariable=self.prog_var,
                                     takefocus=0, width=40)
@@ -382,7 +653,7 @@ class App:
         self.prog_lbl = tk.Label(root, font=("Segoe UI", 12), fg="#1f4f8f")
         self.prog_lbl.pack(pady=(6, 0))
         for v in (self.event_var, self.heat_var):
-            v.trace_add("write", lambda *_: self.update_prog_label())
+            v.trace_add("write", lambda *_: self.on_fields_changed())
 
         self.time_lbl = tk.Label(root, text="00:00.00",
                                  font=("Consolas", 64, "bold"))
@@ -432,9 +703,11 @@ class App:
             n.pack(side="left")
             t = tk.Label(row, text="--:--.--", font=("Consolas", 16))
             t.pack(side="left", padx=10)
-            p = tk.Label(row, text="", font=("Segoe UI", 13, "bold"))
+            p = tk.Label(row, text="", font=("Segoe UI", 13, "bold"), width=3)
             p.pack(side="left")
-            self.lane_lbls[lane] = (b, n, t, p)
+            w = tk.Label(row, text="", font=("Segoe UI", 12), anchor="w", fg="#1f4f8f")
+            w.pack(side="left", padx=(10, 0), fill="x", expand=True)
+            self.lane_lbls[lane] = (b, n, t, p, w)
 
     def key_name(self, k):
         return {"space": "RAZMAK", "Return": "ENTER"}.get(k, k.upper() if len(k) == 1 else k)
@@ -508,11 +781,14 @@ class App:
         elif r.lanes == 1 and 1 in r.finishes:
             self.time_lbl.config(text=fmt(r.finishes[1]))
         pl = {lane: p for p, lane, _ in places(r.finishes)}
-        for lane, (b, n, t, p) in self.lane_lbls.items():
+        for lane, (b, n, t, p, w) in self.lane_lbls.items():
             off = lane in r.disabled
             gray = "#aaaaaa" if off else "black"
             n.config(fg=gray)
             t.config(fg=gray)
+            info = r.lane_info(lane)
+            w.config(text=("%s  -  %s" % info) if info else "",
+                     fg="#aaaaaa" if off else "#1f4f8f")
             if lane in r.finishes:
                 t.config(text=fmt(r.finishes[lane]))
                 p.config(text="%d." % pl[lane])
@@ -523,6 +799,8 @@ class App:
             b.config(text="uključi" if off else "isključi",
                      state="normal" if can else "disabled",
                      bg="#f3d6d6" if off else "#dfeedd")
+        if self.board is not None:
+            self.board.refresh()
         self.root.after(REFRESH_MS, self.tick)
 
     # --- tastatura
@@ -536,6 +814,10 @@ class App:
                 return "break"
             return None
         if k in self.down:               # automatsko ponavljanje držanog tastera
+            return "break"
+        if k == "F11":
+            if self.board is not None:
+                self.board.toggle_fullscreen()
             return "break"
         self.down.add(k)
 
@@ -597,6 +879,34 @@ class App:
         self.race.program_end = False
         return True
 
+    def on_fields_changed(self):
+        """Ručna promena discipline/grupe pre trke: odmah prikaži imena i
+        isključi prazne staze iz startne liste."""
+        r = self.race
+        if r.state == Race.READY:
+            ev = self.event_var.get().strip().upper()
+            try:
+                heat = int(self.heat_var.get())
+            except ValueError:
+                heat = 0
+            if re.fullmatch(r"\d+[A-Z]?", ev) and heat >= 1:
+                r.event, r.heat = ev, heat
+                e = next((x for x in r.program if x["event"] == ev), None)
+                if e is not None and e["distance"] != r.distance:
+                    r.distance = e["distance"]
+                    self.dist_var.set(str(r.distance))
+                self._synced = (ev, heat, r.distance)
+                r.apply_startlist()
+        self.update_prog_label()
+
+    def toggle_board(self):
+        if self.board is None:
+            self.board = Scoreboard(self)
+            self.board.refresh()
+        else:
+            self.board.close()
+        self.root.focus_force()
+
     def toggle_lane(self, lane: int):
         try:
             self.race.toggle_lane(lane)
@@ -605,10 +915,15 @@ class App:
         self.refresh_texts()
         self.root.focus_set()
 
-    def load_program_file(self, path: str, quiet: bool = False):
+    def load_program_file(self, path: str, quiet: bool = False, keep: bool = False):
+        is_lenex = path.lower().endswith((".lxf", ".lef", ".xml"))
         try:
-            prog = load_program(path)
-        except (OSError, ValueError) as ex:
+            if is_lenex:
+                lx = load_lenex(path)
+                prog, startlist, lanes = lx["program"], lx["startlist"], lx["lanes"]
+            else:
+                prog, startlist, lanes = load_program(path), {}, None
+        except (OSError, ValueError, zipfile.BadZipFile) as ex:
             messagebox.showerror("Program", str(ex))
             return
         if not prog:
@@ -616,19 +931,45 @@ class App:
                 messagebox.showwarning("Program", "Fajl ne sadrži nijednu disciplinu.")
             return
         r = self.race
-        r.program = prog
+        if r.state == Race.RUNNING:
+            messagebox.showinfo("Program", "Sačekajte kraj trke pa učitajte ponovo.")
+            return
+        self.program_path = path
+        r.program, r.startlist = prog, startlist
         self.cb_prog.config(values=["%s  -  %dm  -  %d gr.  %s" % (
             e["event"], e["distance"], e["heats"], e["name"]) for e in prog])
-        if r.state != Race.RUNNING:
+        if lanes and lanes != r.lanes:
+            r.set_lanes(lanes)
+            self.lanes_var.set(str(lanes))
+            self.build_lanes()
+        pos = (r.event, r.heat)
+        if keep and any(e["event"] == pos[0] for e in prog):
+            r._applied = None
+            if r.state == Race.READY:
+                r.disabled = set()
+            r.apply_startlist()
+        else:
             r.set_program_event(0)
+            if r.state == Race.DONE:
+                r.reset()
         self.refresh_texts()
+        if is_lenex and not quiet:
+            messagebox.showinfo("Startna lista", "Učitano: %d disciplina, %d grupa, %d staza." % (
+                len(prog), sum(e["heats"] for e in prog), r.lanes))
+
+    def reload_program(self):
+        if self.program_path:
+            self.load_program_file(self.program_path, quiet=True, keep=True)
+        self.root.focus_set()
 
     def choose_program(self):
         if self.race.state == Race.RUNNING:
             return
         path = filedialog.askopenfilename(
             title="Program takmičenja", initialdir=APP_DIR,
-            filetypes=[("Tekst", "*.txt *.csv"), ("Svi fajlovi", "*.*")])
+            filetypes=[("Lenex ili program", "*.lxf *.lef *.txt *.csv"),
+                       ("Lenex startna lista", "*.lxf *.lef"), ("Tekst", "*.txt *.csv"),
+                       ("Svi fajlovi", "*.*")])
         if path:
             self.load_program_file(path)
         self.root.focus_set()
@@ -651,6 +992,8 @@ class App:
         self.root.focus_set()
 
     def on_lanes(self, _e=None):
+        if self.race.state == Race.RUNNING:
+            return
         self.race.set_lanes(int(self.lanes_var.get()))
         self.build_lanes()
         self.refresh_texts()

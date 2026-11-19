@@ -25,6 +25,15 @@ GitHub Actions posle svake izmene na `main` pravi `Stoperica.exe` i `ComSniffer.
 (kartica **Actions** → poslednje pokretanje → **Artifacts**). Za trajno izdanje:
 `git tag v1.0` i `git push origin v1.0` — fajlovi se pojavljuju u **Releases**.
 
+## Startna lista iz Splash-a i semafor
+
+- **Program... → .lxf/.lef** (Lenex startna lista izvezena iz Splash-a): program, broj staza,
+  imena plivača i klubovi po stazama; prazne staze se same isključe. Posle izmena u Splash-u
+  izvezite ponovo i kliknite **Ponovo učitaj** (pozicija discipline/grupe ostaje).
+- **Semafor** otvara drugi prozor; ako je priključen projektor (Win+P → Extend), prozor ide
+  preko celog projektora. **F11** ili dupli klik: ceo ekran uključen/isključen.
+- Na semaforu se kao klub prikazuje kratko ime kluba iz Splash-a, a ako ga nema, skraćen pun naziv.
+
 ## Program takmičenja i prazne staze
 
 `program.txt` pored programa (primer: `program_primer.txt`), jedan red po disciplini:
